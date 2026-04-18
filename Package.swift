@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "MinerScheduler",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v12)],
     products: [
         .executable(name: "MinerScheduler", targets: ["MinerScheduler"])
     ],
