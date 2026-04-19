@@ -329,16 +329,14 @@ class ViewModel: ObservableObject {
                 if key == "Accepted" { accepted = Int(val) ?? 0 }
             }
             
-            // Determine status from SYSTEMSTATU and real-time hashrate
+            // Determine status
             let status: String
             if systemStatus.contains("In Work") && realtimeGHS > 0 {
                 status = "Mining"
-            } else if systemStatus.contains("In Init") || systemStatus.contains("Calibrat") {
-                status = "Starting"
-            } else if systemStatus.contains("In Idle") || realtimeGHS == 0 {
+            } else if systemStatus.contains("In Idle") {
                 status = "Idle"
             } else {
-                status = "Online"
+                status = "Starting"
             }
             
             await MainActor.run {
