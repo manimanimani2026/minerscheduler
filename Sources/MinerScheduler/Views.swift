@@ -180,8 +180,11 @@ struct MinerCardView<Controls: View>: View {
     
     private var statusColor: Color {
         switch status {
-        case "Mining": return .green; case "Idle", "Online": return .yellow
-        case "Checking…": return .gray; default: return .red
+        case "Mining": return .green
+        case "Starting": return .orange
+        case "Idle", "Online": return .yellow
+        case "Checking…": return .gray
+        default: return .red
         }
     }
     
