@@ -200,16 +200,32 @@ class ViewModel: ObservableObject {
     }
     
     func setProtoPowerTarget(_ watts: Int) {
-        let token = protoAuthToken; let ip = protoIP; let port = protoPort
-        Task.detached {
-            let (code, body) = self.curlProto("PUT", "mining/target", ip: ip, port: port, token: token,
-                                               body: "{\"power_target_watts\":\(watts),\"performance_mode\":\"MaximumHashrate\"}")
-            await MainActor.run {
-                if (200...299).contains(code) { self.protoPowerTarget = watts; self.logs.insert("Proto: Power → \(watts)W ✓", at: 0) }
-                else if code == 401 { self.logs.insert("Proto: Auth required — log in first", at: 0) }
-                else { self.logs.insert("Proto: Set power failed (HTTP \(code)) \(body.prefix(80))", at: 0) }
-            }
+        Task {
+            let (code, body) = await protoRequest("PUT", "mining/target",
+                                                   body: "{\"power_target_watts\":\(watts),\"performance_mode\":\"MaximumHashrate\"}")
+            if (200...299).contains(code) { self.protoPowerTarget = watts; self.logs.insert("Proto: Power → \(watts)W ✓", at: 0) }
+            else { self.logs.insert("Proto: Set power failed (HTTP \(code)) \(String(body.prefix(80)))", at: 0) }
         }
+    }
+    
+    // Silent re-login — returns new token or nil
+    nonisolated private func refreshProtoToken(ip: String, port: String, password: String) -> String? {
+        let proc = Process(); let pipe = Pipe()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        proc.arguments = ["-s", "-w", "\n%{http_code}", "--connect-timeout", "5", "-X", "POST",
+                          "-H", "Content-Type: application/json",
+                          "-d", "{\"username\":\"admin\",\"password\":\"\(password)\"}",
+                          "http://\(ip):\(port)/api/v1/auth/login"]
+        proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
+        do { try proc.run(); proc.waitUntilExit() } catch { return nil }
+        let d = pipe.fileHandleForReading.readDataToEndOfFile()
+        let o = String(data: d, encoding: .utf8) ?? ""
+        let lines = o.components(separatedBy: "\n")
+        let code = Int(lines.last ?? "") ?? 0
+        let body = lines.dropLast().joined(separator: "\n")
+        guard (200...299).contains(code) else { return nil }
+        if let j = self.parseJSON(body) { return j["access_token"] as? String ?? j["token"] as? String }
+        return nil
     }
     
     func loginProto() {
@@ -217,56 +233,59 @@ class ViewModel: ObservableObject {
         protoLoginError = ""; let pw = protoPassword; let ip = protoIP; let port = protoPort
         logs.insert("Proto: Logging in…", at: 0)
         Task.detached {
-            let proc = Process(); let pipe = Pipe()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-            proc.arguments = ["-s", "-w", "\n%{http_code}", "--connect-timeout", "5", "-X", "POST",
-                              "-H", "Content-Type: application/json",
-                              "-d", "{\"username\":\"admin\",\"password\":\"\(pw)\"}",
-                              "http://\(ip):\(port)/api/v1/auth/login"]
-            proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
-            do { try proc.run(); proc.waitUntilExit() } catch {
-                await MainActor.run { self.protoLoginError = "Failed to connect" }; return
-            }
-            let d = pipe.fileHandleForReading.readDataToEndOfFile()
-            let o = String(data: d, encoding: .utf8) ?? ""
-            let lines = o.components(separatedBy: "\n")
-            let code = Int(lines.last ?? "") ?? 0
-            let body = lines.dropLast().joined(separator: "\n")
-            guard (200...299).contains(code) else {
-                let msg: String
-                if let j = self.parseJSON(body), let m = j["message"] as? String { msg = m } else { msg = "HTTP \(code)" }
-                await MainActor.run { self.protoLoginError = msg; self.protoPassword = "" }; return
-            }
-            let token: String?
-            if let j = self.parseJSON(body) { token = j["access_token"] as? String ?? j["token"] as? String } else { token = nil }
+            let token = self.refreshProtoToken(ip: ip, port: port, password: pw)
             await MainActor.run {
-                self.protoAuthToken = token; self.protoLoggedIn = true
-                self.logs.insert("Proto: Logged in ✓", at: 0); self.checkAllStatuses()
+                if let token = token {
+                    self.protoAuthToken = token; self.protoLoggedIn = true
+                    self.logs.insert("Proto: Logged in ✓", at: 0); self.checkAllStatuses()
+                } else {
+                    self.protoLoginError = "Wrong password"; self.protoPassword = ""
+                }
             }
         }
+    }
+    
+    // Auto-retry: try request, if 401 re-login and retry once
+    private func protoRequest(_ method: String, _ path: String, body: String? = nil) async -> (Int, String) {
+        let ip = protoIP; let port = protoPort; let pw = protoPassword
+        var token = protoAuthToken
+        
+        let result: (Int, String) = await Task.detached {
+            let (code, body) = self.curlProto(method, path, ip: ip, port: port, token: token, body: body)
+            if code == 401 && !pw.isEmpty {
+                // Token expired — re-login silently
+                if let newToken = self.refreshProtoToken(ip: ip, port: port, password: pw) {
+                    token = newToken
+                    return self.curlProto(method, path, ip: ip, port: port, token: newToken, body: body)
+                }
+            }
+            return (code, body)
+        }.value
+        
+        // Update token if it was refreshed
+        if token != protoAuthToken {
+            protoAuthToken = token
+            logs.insert("Proto: Token refreshed ✓", at: 0)
+        }
+        
+        return result
     }
     
     func controlProto(_ action: String) {
         let endpoint = action == "on" ? "mining/start" : "mining/stop"
-        let token = protoAuthToken; let ip = protoIP; let port = protoPort
-        Task.detached {
-            let (code, _) = self.curlProto("POST", endpoint, ip: ip, port: port, token: token)
-            await MainActor.run {
-                self.logs.insert("Proto: \(action.uppercased()) \((200...299).contains(code) ? "✓" : "✗ HTTP \(code)")", at: 0)
-            }
+        Task {
+            let (code, _) = await protoRequest("POST", endpoint)
+            self.logs.insert("Proto: \(action.uppercased()) \((200...299).contains(code) ? "✓" : "✗ HTTP \(code)")", at: 0)
             try? await Task.sleep(nanoseconds: 2_000_000_000)
-            await MainActor.run { self.checkProtoStatus() }
+            self.checkProtoStatus()
         }
     }
     
     func rebootProto() {
-        let token = protoAuthToken; let ip = protoIP; let port = protoPort
-        Task.detached {
-            let (code, _) = self.curlProto("POST", "system/reboot", ip: ip, port: port, token: token)
-            await MainActor.run {
-                self.logs.insert("Proto: Reboot \((200...299).contains(code) ? "✓" : "✗ HTTP \(code)")", at: 0)
-                if (200...299).contains(code) { self.protoStatus = "Rebooting…" }
-            }
+        Task {
+            let (code, _) = await protoRequest("POST", "system/reboot")
+            self.logs.insert("Proto: Reboot \((200...299).contains(code) ? "✓" : "✗ HTTP \(code)")", at: 0)
+            if (200...299).contains(code) { self.protoStatus = "Rebooting…" }
         }
     }
     
