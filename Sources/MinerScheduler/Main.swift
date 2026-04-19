@@ -286,11 +286,12 @@ class ViewModel: ObservableObject {
             }
             
             // Parse litestats
-            var hashrateTH: Double = 0
+            var realtimeGHS: Double = 0
             var power: Double = 0
             var workmode = "—"
             var fanPct = ""
             var temp = ""
+            var systemStatus = ""
             
             // Extract key=value pairs from litestats (format: KEY[VALUE])
             let bracketPattern = lite
@@ -301,7 +302,8 @@ class ViewModel: ObservableObject {
                 return String(bracketPattern[start..<end.lowerBound])
             }
             
-            if let gh = extract("GHSavg") { hashrateTH = (Double(gh) ?? 0) / 1000 }
+            if let gh = extract("GHSspd") { realtimeGHS = Double(gh) ?? 0 }
+            if let ss = extract("SYSTEMSTATU") { systemStatus = ss }
             if let mpo = extract("MPO") { power = Double(mpo) ?? 0 }
             if let wm = extract("WORKMODE") {
                 switch wm {
@@ -314,6 +316,7 @@ class ViewModel: ObservableObject {
             if let fr = extract("FanR") { fanPct = fr }
             if let t = extract("TAvg") { temp = t }
             
+            let hashrateTH = realtimeGHS / 1000
             let eff = (power > 0 && hashrateTH > 0) ? power / hashrateTH : 0
             
             // Parse summary for accepted
@@ -326,6 +329,18 @@ class ViewModel: ObservableObject {
                 if key == "Accepted" { accepted = Int(val) ?? 0 }
             }
             
+            // Determine status from SYSTEMSTATU and real-time hashrate
+            let status: String
+            if systemStatus.contains("In Work") && realtimeGHS > 0 {
+                status = "Mining"
+            } else if systemStatus.contains("In Init") || systemStatus.contains("Calibrat") {
+                status = "Starting"
+            } else if systemStatus.contains("In Idle") || realtimeGHS == 0 {
+                status = "Idle"
+            } else {
+                status = "Online"
+            }
+            
             await MainActor.run {
                 self.avalonHashrate = hashrateTH
                 self.avalonPower = power
@@ -334,7 +349,7 @@ class ViewModel: ObservableObject {
                 self.avalonMode = workmode
                 self.avalonFanPct = fanPct
                 self.avalonTemp = temp
-                self.avalonStatus = hashrateTH > 0 ? "Mining" : "Idle"
+                self.avalonStatus = status
             }
         }
     }
