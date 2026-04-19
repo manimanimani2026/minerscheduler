@@ -25,7 +25,7 @@ class ViewModel: ObservableObject {
     // Avalon state (all from litestats — no auth needed)
     @Published var avalonStatus = "Checking…"
     @Published var avalonHashrate: Double = 0    // TH/s
-    @Published var avalonPower: Double = 0       // Watts (MPO from litestats)
+    @Published var avalonPower: Double = 0       // Watts (wall power from PS[6])
     @Published var avalonEfficiency: Double = 0  // J/TH
     @Published var avalonAccepted: Int = 0
     @Published var avalonMode = "—"              // Eco/Standard/Super
@@ -323,7 +323,10 @@ class ViewModel: ObservableObject {
             
             if let gh = extract("GHSspd") { realtimeGHS = Double(gh) ?? 0 }
             if let ss = extract("SYSTEMSTATU") { systemStatus = ss }
-            if let mpo = extract("MPO") { power = Double(mpo) ?? 0 }
+            if let ps = extract("PS") {
+                let parts = ps.components(separatedBy: " ")
+                if parts.count >= 7, let wallPower = Double(parts[6]) { power = wallPower }
+            }
             if let wm = extract("WORKMODE") {
                 switch wm {
                 case "0": workmode = "Eco"
