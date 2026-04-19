@@ -182,7 +182,7 @@ struct MinerCardView<Controls: View>: View {
         switch status {
         case "Mining": return .green
         case "Offline": return .red
-        case "Idle": return .gray
+        case "Idle", "Stopped": return .gray
         default: return .orange
         }
     }
